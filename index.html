@@ -35,12 +35,28 @@
   .empty, #error { color: var(--muted); padding: 8px 0; }
   #error { color: var(--warn); }
   #updated { color: var(--muted); font-size: 12px; text-align: right; margin-top: 8px; }
+
+  html, body { height: 100%; }
+  body { display: flex; flex-direction: column; overflow: hidden; }
+  #grid { flex: none; }
+  #news { flex: 1; min-height: 0; margin-top: 4px; display: flex; flex-direction: column; }
+  #news h3 { margin: 6px 2px 8px; font-size: 18px; font-weight: 600; color: var(--muted); }
+  #newsList { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 10px; }
+  .item { display: grid; grid-template-columns: 120px 1fr; gap: 14px; align-items: start;
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+  .item.noimg { grid-template-columns: 1fr; }
+  .item img { width: 120px; height: 80px; object-fit: cover; border-radius: 6px; background: var(--line); }
+  .item .t { font-size: 19px; font-weight: 600; line-height: 1.25; }
+  .item .d { color: var(--muted); font-size: 15px; margin-top: 4px; line-height: 1.3;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .item .a { color: var(--muted); font-size: 12px; margin-top: 4px; }
 </style>
 </head>
 <body>
 <div id="error" hidden></div>
 <div id="grid"></div>
 <div id="updated"></div>
+<section id="news" hidden><h3>Yle Uutiset</h3><div id="newsList"></div></section>
 
 <script>
 // ====== ASETUKSET ======
@@ -145,6 +161,52 @@ async function load() {
 
 load();
 setInterval(load, REFRESH_SECONDS * 1000);
+
+// ====== UUTISET ======
+const NEWS_FEED = "https://feeds.yle.fi/uutiset/v1/majorHeadlines/YLE_UUTISET.rss";
+const NEWS_REFRESH_MINUTES = 10;
+const NEWS_URL = "https://api.rss2json.com/v1/api.json?rss_url=" + encodeURIComponent(NEWS_FEED);
+
+const plain = h => { const d = document.createElement("div"); d.innerHTML = h || ""; return d.textContent.trim(); };
+function ago(str) {
+  const t = new Date(str.replace(" ", "T") + (str.includes("T") || /Z|[+-]\d\d:?\d\d$/.test(str) ? "" : "Z"));
+  const m = Math.round((Date.now() - t.getTime()) / 60000);
+  if (isNaN(m)) return "";
+  if (m < 60) return Math.max(m, 1) + " min sitten";
+  if (m < 1440) return Math.round(m / 60) + " h sitten";
+  return Math.round(m / 1440) + " vrk sitten";
+}
+function fitNews() {
+  const list = document.getElementById("newsList");
+  const items = [...list.children];
+  items.forEach(i => i.style.display = "");
+  const limit = list.getBoundingClientRect().bottom;
+  items.forEach(i => { if (i.getBoundingClientRect().bottom > limit + 1) i.style.display = "none"; });
+}
+async function loadNews() {
+  try {
+    const res = await fetch(NEWS_URL);
+    const json = await res.json();
+    if (json.status !== "ok") throw new Error("virhe");
+    const html = json.items.slice(0, 12).map(it => {
+      const img = it.thumbnail || (it.enclosure && it.enclosure.link) || "";
+      const desc = plain(it.description);
+      return `<div class="item${img ? "" : " noimg"}">
+        ${img ? `<img src="${esc(img)}" alt="" onerror="this.parentNode.classList.add('noimg');this.remove();fitNews()">` : ""}
+        <div><div class="t">${esc(plain(it.title))}</div>
+        ${desc ? `<div class="d">${esc(desc)}</div>` : ""}
+        <div class="a">${esc(ago(it.pubDate))}</div></div>
+      </div>`;
+    }).join("");
+    document.getElementById("newsList").innerHTML = html;
+    document.getElementById("news").hidden = false;
+    fitNews();
+  } catch (e) { /* uutisten virhe ei estä aikataulujen näyttöä */ }
+}
+loadNews();
+setInterval(loadNews, NEWS_REFRESH_MINUTES * 60000);
+window.addEventListener("resize", fitNews);
+setInterval(fitNews, 30000); // aikataulujen päivitys voi muuttaa tilaa
 </script>
 </body>
 </html>
