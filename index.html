@@ -39,17 +39,17 @@
   html, body { height: 100%; }
   body { display: flex; flex-direction: column; overflow: hidden; }
   #grid { flex: none; }
-  #news { flex: 1; min-height: 0; margin-top: 4px; display: flex; flex-direction: column; }
-  #news h3 { margin: 6px 2px 8px; font-size: 18px; font-weight: 600; color: var(--muted); }
-  #newsList { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 10px; }
-  .item { display: grid; grid-template-columns: 120px 1fr; gap: 14px; align-items: start;
-    background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
-  .item.noimg { grid-template-columns: 1fr; }
-  .item img { width: 120px; height: 80px; object-fit: cover; border-radius: 6px; background: var(--line); }
-  .item .t { font-size: 19px; font-weight: 600; line-height: 1.25; }
-  .item .d { color: var(--muted); font-size: 15px; margin-top: 4px; line-height: 1.3;
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .item .a { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  #news { flex: 1; min-height: 0; margin-top: 4px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  #news .col { min-height: 0; display: flex; flex-direction: column; background: var(--card);
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px 4px; }
+  #news h3 { margin: 0 0 4px; font-size: 16px; font-weight: 600; color: var(--accent);
+    text-transform: uppercase; letter-spacing: .08em; }
+  #news .list { flex: 1; min-height: 0; overflow: hidden; }
+  #news .n { padding: 9px 0; border-top: 1px solid var(--line); }
+  #news .n:first-child { border-top: 0; }
+  #news .t { font-size: 18px; font-weight: 500; line-height: 1.25; }
+  #news .a { color: var(--muted); font-size: 12px; margin-top: 3px; }
+  @media (max-width: 600px) { #news { grid-template-columns: 1fr; } }
 
   /* Vuodenaikateemat: hillitty sävy taustaan ja korttien reunoihin */
   :root { --accent: #9cc4ee; --glow: rgba(120,170,230,.10); --dim: 1; }
@@ -81,7 +81,7 @@
 <div id="error" hidden></div>
 <div id="grid"></div>
 <div id="updated"></div>
-<section id="news" hidden><h3>Yle Uutiset</h3><div id="newsList"></div></section>
+<section id="news"><div class="col"><h3>Helsinki</h3><div class="list" id="newsLocal"><div class="n"><div class="a">Ladataan…</div></div></div></div><div class="col"><h3>Luetuimmat</h3><div class="list" id="newsTop"><div class="n"><div class="a">Ladataan…</div></div></div></div></section>
 
 <script>
 // ====== ASETUKSET ======
@@ -187,51 +187,102 @@ async function load() {
 load();
 setInterval(load, REFRESH_SECONDS * 1000);
 
-// ====== UUTISET ======
-const NEWS_FEED = "https://feeds.yle.fi/uutiset/v1/majorHeadlines/YLE_UUTISET.rss";
-const NEWS_REFRESH_MINUTES = 10;
-const NEWS_URL = "https://api.rss2json.com/v1/api.json?rss_url=" + encodeURIComponent(NEWS_FEED);
+// ====== UUTISET (Yle Uutiset: Helsinki + luetuimmat) ======
+// Ylen RSS-ehdot sallivat otsikoiden näyttämisen; kuvia tai artikkelitekstejä ei käytetä.
+const FEEDS = [
+  { el: "newsLocal", key: "local", time: true,  url: "https://feeds.yle.fi/uutiset/v1/recent.rss?publisherIds=YLE_UUTISET&concepts=18-194469" }, // Helsinki
+  { el: "newsTop",   key: "top",   time: false, url: "https://feeds.yle.fi/uutiset/v1/mostRead/YLE_UUTISET.rss" }                               // luetuimmat
+];
+const NEWS_REFRESH_MINUTES = 3;
+// Selain ei voi hakea Ylen syötettä suoraan, joten haku kulkee välipalvelun kautta. Kokeillaan järjestyksessä.
+const PROXIES = [
+  { name: "rss2json",  xml: false, make: u => "https://api.rss2json.com/v1/api.json?rss_url=" + encodeURIComponent(u) },
+  { name: "allorigins", xml: true,  make: u => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u) }
+];
+const newsCache = {};
 
-const plain = h => { const d = document.createElement("div"); d.innerHTML = h || ""; return d.textContent.trim(); };
+async function fetchWithTimeout(url, ms = 8000) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms);
+  try { return await fetch(url, { signal: c.signal, cache: "no-store" }); } finally { clearTimeout(t); }
+}
+async function fetchFeed(url) {
+  const bust = url;
+  const errors = [];
+  for (const p of PROXIES) {
+    try {
+      const res = await fetchWithTimeout(p.make(bust), 7000);
+      if (!res.ok) { errors.push(p.name + " " + res.status); continue; }
+      let items;
+      if (p.xml) {
+        const doc = new DOMParser().parseFromString(await res.text(), "text/xml");
+        items = [...doc.querySelectorAll("item")].map(i => ({
+          title: (i.querySelector("title") || {}).textContent,
+          date: (i.querySelector("pubDate") || {}).textContent
+        }));
+      } else {
+        const j = await res.json();
+        if (j.status !== "ok") { errors.push(p.name + " " + (j.message || j.status)); continue; }
+        items = j.items.map(i => ({ title: i.title, date: i.pubDate }));
+      }
+      items = items.filter(i => i.title && i.title.trim());
+      if (items.length) return items;
+      errors.push(p.name + " tyhjä");
+    } catch (e) { errors.push(p.name + " " + (e.name === "AbortError" ? "aikakatkaisu" : "virhe")); }
+  }
+  throw new Error(errors.join(", "));
+}
 function ago(str) {
-  const t = new Date(str.replace(" ", "T") + (str.includes("T") || /Z|[+-]\d\d:?\d\d$/.test(str) ? "" : "Z"));
+  if (!str) return "";
+  const t = /^\d{4}-\d\d-\d\d \d/.test(str) ? new Date(str.replace(" ", "T") + "Z") : new Date(str);
   const m = Math.round((Date.now() - t.getTime()) / 60000);
   if (isNaN(m)) return "";
   if (m < 60) return Math.max(m, 1) + " min sitten";
   if (m < 1440) return Math.round(m / 60) + " h sitten";
   return Math.round(m / 1440) + " vrk sitten";
 }
+function renderFeed(f) {
+  const items = newsCache[f.el];
+  if (!items) return;
+  document.getElementById(f.el).innerHTML = items.slice(0, 12).map(it =>
+    `<div class="n"><div class="t">${esc(it.title.trim())}</div>` +
+    (f.time && it.date ? `<div class="a">${esc(ago(it.date))}</div>` : "") + `</div>`).join("");
+}
 function fitNews() {
-  const list = document.getElementById("newsList");
-  const items = [...list.children];
-  items.forEach(i => i.style.display = "");
-  const limit = list.getBoundingClientRect().bottom;
-  items.forEach(i => { if (i.getBoundingClientRect().bottom > limit + 1) i.style.display = "none"; });
+  document.querySelectorAll("#news .list").forEach(list => {
+    const items = [...list.children];
+    items.forEach(i => i.style.display = "");
+    const limit = list.getBoundingClientRect().bottom;
+    items.forEach(i => { if (i.getBoundingClientRect().bottom > limit + 1) i.style.display = "none"; });
+  });
 }
 async function loadNews() {
+  document.getElementById("news").hidden = false;
+  // 1) Ensisijainen lähde: news.json samalta sivustolta (päivittää GitHub Actions -automaatio)
+  let local = null;
   try {
-    const res = await fetch(NEWS_URL);
-    const json = await res.json();
-    if (json.status !== "ok") throw new Error("virhe");
-    const html = json.items.slice(0, 12).map(it => {
-      const img = it.thumbnail || (it.enclosure && it.enclosure.link) || "";
-      const desc = plain(it.description);
-      return `<div class="item${img ? "" : " noimg"}">
-        ${img ? `<img src="${esc(img)}" alt="" onerror="this.parentNode.classList.add('noimg');this.remove();fitNews()">` : ""}
-        <div><div class="t">${esc(plain(it.title))}</div>
-        ${desc ? `<div class="d">${esc(desc)}</div>` : ""}
-        <div class="a">${esc(ago(it.pubDate))}</div></div>
-      </div>`;
-    }).join("");
-    document.getElementById("newsList").innerHTML = html;
-    document.getElementById("news").hidden = false;
-    fitNews();
-  } catch (e) { /* uutisten virhe ei estä aikataulujen näyttöä */ }
+    const r = await fetchWithTimeout("news.json?_=" + Date.now(), 6000);
+    if (r.ok) local = await r.json();
+  } catch (e) { /* ei news.json:ia, käytetään välipalveluja */ }
+  await Promise.all(FEEDS.map(async f => {
+    try {
+      newsCache[f.el] = (local && local[f.key] && local[f.key].length) ? local[f.key] : await fetchFeed(f.url);
+    } catch (e) {
+      if (!newsCache[f.el]) {
+        document.getElementById(f.el).innerHTML = `<div class="n"><div class="a">Uutisten haku epäonnistui (${esc(e.message)}). Yritetään uudelleen…</div></div>`;
+        return;
+      }
+    }
+    renderFeed(f);
+  }));
+  fitNews();
 }
 loadNews();
 setInterval(loadNews, NEWS_REFRESH_MINUTES * 60000);
+setTimeout(() => { if (!Object.keys(newsCache).length) loadNews(); }, 20000);
+// Ajat ("12 min sitten") päivittyvät ilman uutta hakua
+setInterval(() => { FEEDS.forEach(renderFeed); fitNews(); }, 60000);
 window.addEventListener("resize", fitNews);
-setInterval(fitNews, 30000); // aikataulujen päivitys voi muuttaa tilaa
 
 // ====== KELLO, PÄIVÄMÄÄRÄ, TEEMA ======
 const urlParams = new URLSearchParams(location.search);
