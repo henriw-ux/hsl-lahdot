@@ -81,7 +81,7 @@
 <div id="error" hidden></div>
 <div id="grid"></div>
 <div id="updated"></div>
-<section id="news" hidden><div class="col"><h3>Helsinki</h3><div class="list" id="newsLocal"></div></div><div class="col"><h3>Luetuimmat</h3><div class="list" id="newsTop"></div></div></section>
+<section id="news"><div class="col"><h3>Helsinki</h3><div class="list" id="newsLocal"><div class="n"><div class="a">Ladataan…</div></div></div></div><div class="col"><h3>Luetuimmat</h3><div class="list" id="newsTop"><div class="n"><div class="a">Ladataan…</div></div></div></div></section>
 
 <script>
 // ====== ASETUKSET ======
@@ -196,9 +196,9 @@ const FEEDS = [
 const NEWS_REFRESH_MINUTES = 3;
 // Selain ei voi hakea Ylen syötettä suoraan, joten haku kulkee välipalvelun kautta. Kokeillaan järjestyksessä.
 const PROXIES = [
-  { xml: true,  make: u => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u) },
-  { xml: true,  make: u => "https://corsproxy.io/?url=" + encodeURIComponent(u) },
-  { xml: false, make: u => "https://api.rss2json.com/v1/api.json?rss_url=" + encodeURIComponent(u) }
+  { name: "rss2json",  xml: false, make: u => "https://api.rss2json.com/v1/api.json?rss_url=" + encodeURIComponent(u) },
+  { name: "allorigins", xml: true,  make: u => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u) },
+  { name: "corsproxy",  xml: true,  make: u => "https://corsproxy.io/?url=" + encodeURIComponent(u) }
 ];
 const newsCache = {};
 
@@ -208,10 +208,13 @@ async function fetchWithTimeout(url, ms = 8000) {
   try { return await fetch(url, { signal: c.signal, cache: "no-store" }); } finally { clearTimeout(t); }
 }
 async function fetchFeed(url) {
+  // Välimuistin kierto: lisätään osoitteeseen kolmen minuutin välein vaihtuva tunniste
+  const bust = url + (url.includes("?") ? "&" : "?") + "_=" + Math.floor(Date.now() / 180000);
+  const errors = [];
   for (const p of PROXIES) {
     try {
-      const res = await fetchWithTimeout(p.make(url));
-      if (!res.ok) continue;
+      const res = await fetchWithTimeout(p.make(bust), 7000);
+      if (!res.ok) { errors.push(p.name + " " + res.status); continue; }
       let items;
       if (p.xml) {
         const doc = new DOMParser().parseFromString(await res.text(), "text/xml");
@@ -221,14 +224,15 @@ async function fetchFeed(url) {
         }));
       } else {
         const j = await res.json();
-        if (j.status !== "ok") continue;
+        if (j.status !== "ok") { errors.push(p.name + " " + (j.message || j.status)); continue; }
         items = j.items.map(i => ({ title: i.title, date: i.pubDate }));
       }
       items = items.filter(i => i.title && i.title.trim());
       if (items.length) return items;
-    } catch (e) { /* kokeillaan seuraavaa välipalvelua */ }
+      errors.push(p.name + " tyhjä");
+    } catch (e) { errors.push(p.name + " " + (e.name === "AbortError" ? "aikakatkaisu" : "virhe")); }
   }
-  throw new Error("syötettä ei saatu");
+  throw new Error(errors.join(", "));
 }
 function ago(str) {
   if (!str) return "";
@@ -255,15 +259,22 @@ function fitNews() {
   });
 }
 async function loadNews() {
+  document.getElementById("news").hidden = false;
   await Promise.all(FEEDS.map(async f => {
-    try { newsCache[f.el] = await fetchFeed(f.url); } catch (e) { /* näytetään edellinen onnistunut haku */ }
+    try { newsCache[f.el] = await fetchFeed(f.url); }
+    catch (e) {
+      if (!newsCache[f.el]) {
+        document.getElementById(f.el).innerHTML = `<div class="n"><div class="a">Uutisten haku epäonnistui (${esc(e.message)}). Yritetään uudelleen…</div></div>`;
+        return;
+      }
+    }
     renderFeed(f);
   }));
-  if (Object.keys(newsCache).length) document.getElementById("news").hidden = false;
   fitNews();
 }
 loadNews();
 setInterval(loadNews, NEWS_REFRESH_MINUTES * 60000);
+setTimeout(() => { if (!Object.keys(newsCache).length) loadNews(); }, 20000);
 // Ajat ("12 min sitten") päivittyvät ilman uutta hakua
 setInterval(() => { FEEDS.forEach(renderFeed); fitNews(); }, 60000);
 window.addEventListener("resize", fitNews);
